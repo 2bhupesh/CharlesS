@@ -1,5 +1,7 @@
 # Implementation Plan — Agentic SDLC Orchestration System (URL Shortener)
 
+**Stack: C# 14 / .NET 10** | Companion docs: `docs/ARCHITECTURE.md`, `docs/SPECIFICATIONS.md`
+
 ## 1. Context
 
 Charles Schwab interview assignment (2–3 day effort): build a working prototype of an **Agentic Software Engineering System** that automates the Software Development Life Cycle for a **URL shortener service** with controlled autonomy — human oversight, policy guardrails, and explicit approval checkpoints.
@@ -8,149 +10,227 @@ The **critical differentiator** is the workflow orchestration layer: non-linear 
 
 **Deliverables:** runnable prototype, architecture overview, three demo scenarios (greenfield / brownfield / ambiguous), setup instructions, testing approach + limitations + trade-offs.
 
-**Environment:** `C:\Bhupesh\CharlesS`, Windows 10, Python 3.14.0. Verified compatible: fastapi 0.140.7, pydantic 2.13.4, uvicorn, httpx, pytest 9.1.1.
+**Environment:** `C:\Bhupesh\CharlesS`, Windows 10. Verified installed: **.NET SDK 10.0.302** (current LTS) with ASP.NET Core runtime 10.0.10. Note: stale 1.1.x/2.1.x SDKs are also present on this machine, so `global.json` pinning is mandatory (see Risks).
 
 ## 2. Confirmed decisions
 
-1. **Python end-to-end** — FastAPI shortener + Python orchestrator.
-2. **Hybrid agent brains** — agents call the Claude API when `ANTHROPIC_API_KEY` is set; every agent has a deterministic offline fallback so the full demo runs with zero keys. Offline is the default demo path.
-3. **CLI approvals + read-only web dashboard** (live DAG, gates, audit tail, metrics).
-4. **Full shortener scope** — shorten/redirect/delete, custom aliases, TTL, click analytics, rate limiting, health checks, SQLite, unit + integration tests.
+1. **Full .NET end-to-end** — orchestrator, agents, policy engine, CLI, dashboard, and the target URL shortener are all C#/.NET 10. One toolchain, one language, coherent story.
+2. **Hybrid agent brains** — agents call the Claude API through `Microsoft.Extensions.AI.IChatClient` when `ANTHROPIC_API_KEY` is set and `--llm` is passed; every agent has a deterministic offline generator so the full demo runs with zero keys and zero network. **Offline is the default demo path.**
+3. **Spectre.Console CLI approvals + read-only web dashboard** — a minimal-API dashboard serving one static page that polls run files (not Blazor), preserving the file-based decoupling so it works both live and post-run.
+4. **Full shortener scope** — create/redirect/delete, custom aliases, TTL expiry, click analytics, rate limiting, health checks, SQLite persistence, unit + integration tests.
 
-## 3. Repository structure
+Where the platform provides a capability, we use it rather than hand-rolling: Polly for resilience, ASP.NET Core rate limiting and health checks, `TimeProvider` for clock injection, Roslyn for code analysis. Hand-rolled equivalents would be weaker and would read as not knowing the platform.
+
+## 3. Solution layout
 
 ```
 C:\Bhupesh\CharlesS\
-├── README.md  requirements.txt  .env.example  .gitignore
-├── run_scenario.py                  # python run_scenario.py greenfield [--auto-approve] [--offline|--llm] | stop <run_id>
-├── agentic_sdlc/
-│   ├── cli.py
-│   ├── orchestrator/                # workflow.py (DSL), states.py, engine.py, context.py,
-│   │                                # artifacts.py, gates.py, approvals.py, retry.py,
-│   │                                # replanner.py, rollback.py, safestop.py, audit.py, metrics.py
-│   ├── agents/                      # base.py + requirements_analyst, planner, architect,
-│   │                                # code_generator, test_engineer, reviewer, doc_writer, release_manager
-│   ├── llm/                         # client.py (anthropic wrapper), offline.py (template generators)
-│   ├── policy/                      # engine.py, rules.py
-│   ├── templates/                   # greenfield/ (v_bug + v_fixed variants), brownfield/, ambiguous/, common/
-│   └── dashboard/                   # server.py + static/index.html (vanilla JS polling)
-├── scenarios/                       # greenfield.py, brownfield.py, ambiguous.py (DAG + fault injections)
-├── target_app/                      # hand-built baseline shortener = the brownfield "existing codebase" (+ its tests)
-├── workspace/runs/<run_id>/         # gitignored: audit.jsonl, state.json, metrics.json,
-│                                    # artifacts/<name>/v<N>/, output/ (generated app), snapshots/, summary/
-├── docs/                            # ARCHITECTURE.md, SCENARIOS.md, ENGINEERING_SUMMARY.md, TESTING.md
-└── tests/                           # engine/policy/lineage/replan unit tests + 3 scenario smoke tests
+├── AgenticSdlc.sln
+├── global.json                      # pins SDK 10.0.302 (rollForward: latestFeature)
+├── Directory.Build.props            # net10.0, nullable enable, TreatWarningsAsErrors, LangVersion latest
+├── README.md  .env.example  .gitignore
+├── src/
+│   ├── AgenticSdlc.Core/            # domain: TaskState + transition table, workflow DSL records,
+│   │                                # artifact models, gate abstractions, audit event contracts
+│   ├── AgenticSdlc.Engine/          # state actor (Channel), scheduler, gate evaluator, Polly retry,
+│   │                                # replanner, rollback, safe-stop, audit writer, metrics folder
+│   ├── AgenticSdlc.Agents/          # AgentBase + 8 role agents; Roslyn impact analysis,
+│   │                                # in-memory compilation review, dotnet-test runner
+│   ├── AgenticSdlc.Policy/          # 6 rules: SecretScan, ForbiddenApis, ProtectedPaths,
+│   │                                # ChangeBudget, TestGate, ReleasePolicy
+│   ├── AgenticSdlc.Llm/             # IChatClient wiring + Anthropic Messages adapter (HttpClient)
+│   │                                # + deterministic offline generators
+│   ├── AgenticSdlc.Cli/             # Spectre.Console host + Scenarios/ (greenfield, brownfield, ambiguous)
+│   ├── AgenticSdlc.Dashboard/       # minimal API + wwwroot/index.html (vanilla JS polling)
+│   └── TargetApp.UrlShortener/      # baseline app = the brownfield "existing codebase"
+├── templates/                       # generated-code templates: greenfield/ (v_bug + v_fixed),
+│                                    # brownfield/, ambiguous/, common/ (prose artifacts)
+├── tests/
+│   ├── AgenticSdlc.Tests/           # engine, policy, lineage, replanner, offline agents, scenario smoke
+│   └── TargetApp.UrlShortener.Tests/# xUnit + WebApplicationFactory (in-process, no live server)
+├── workspace/runs/<runId>/          # gitignored: audit.jsonl, state.json, metrics.json,
+│                                    # artifacts/<name>/v<N>/, output/ (generated app),
+│                                    # snapshots/, summary/FINAL_SUMMARY.md
+└── docs/                            # ARCHITECTURE.md, SPECIFICATIONS.md, SCENARIOS.md,
+                                     # ENGINEERING_SUMMARY.md, TESTING.md
 ```
 
-Key principle: greenfield **generates a real runnable app** into `workspace/runs/<id>/output/` and its pytest suite is actually executed in a subprocess. `target_app/` is a real, tested baseline that brownfield modifies. Nothing is simulated where it can be real.
+**Key principle:** greenfield **generates a real, compiling, runnable ASP.NET Core project** into the run's `output/` directory and its xUnit suite is genuinely executed via `dotnet test`. `TargetApp.UrlShortener` is a real, tested baseline that the brownfield scenario modifies. Nothing is simulated where it can be real.
+
+**NuGet dependencies** (kept deliberately small; ASP.NET Core itself comes from the shared framework, not NuGet):
+
+| Package | Used by | Purpose |
+|---|---|---|
+| `Spectre.Console` | Cli | Approval prompts, selection menus, tables, live DAG rendering |
+| `Microsoft.Extensions.Resilience` (Polly v8) | Engine | Retry pipelines: exponential backoff + jitter, timeout |
+| `Microsoft.CodeAnalysis.CSharp` (Roslyn) | Agents, Policy | Semantic impact analysis, in-memory compile, banned-API detection |
+| `Microsoft.Data.Sqlite` | TargetApp + generated app | Persistence (ADO.NET, no ORM) |
+| `Microsoft.Extensions.AI` | Llm | `IChatClient` abstraction + middleware pipeline |
+| `Microsoft.Extensions.Hosting` / `.DependencyInjection` / `.Configuration` | all hosts | DI, keyed agent registry, options binding |
+| `xunit.v3`, `Microsoft.AspNetCore.Mvc.Testing`, `Microsoft.Extensions.TimeProvider.Testing` | tests | Test framework, in-process HTTP, fake clock |
 
 ## 4. Orchestrator engine (the differentiator)
 
-- **DAG declaration = Python DSL** (frozen dataclasses, not YAML — gates are predicates, fault injections are callables). `Task(id, agent, depends_on, consumes, produces, entry_gates, exit_gates, retry, fallback, parallel_group)`. Workflow validates acyclicity + artifact coverage at load.
-- **Gate semantics**: entry gates (deps DONE, artifacts exist + hashes current, policy pre-checks, no safe-stop) gate READY. Exit gates run in order: schema validation, policy post-checks, TestGate, ApprovalGate last. Changesets are **staged, validated, then applied** to `output/` (after snapshotting) — this makes rollback trivial.
-- **State machine** (`states.py` has explicit `LEGAL_TRANSITIONS`; a single `transition()` function is the only mutation point, one audit event per transition):
-  `PENDING -> READY -> RUNNING -> VALIDATING -> AWAITING_APPROVAL -> DONE`, plus `RETRYING`, `BLOCKED` (policy), `FAILED`, `INVALIDATED` (replan), `ROLLED_BACK`, `SKIPPED` (branch not chosen), `CANCELLED` (safe-stop).
-- **Concurrency**: asyncio, single process (I/O-bound work; no locks needed; Windows Proactor loop supports async subprocess for pytest). Semaphore bounds parallelism (3). Synchronization = DAG join nodes. `input()` and copytree via `asyncio.to_thread`. No `add_signal_handler` on Windows — safe-stop via KeyboardInterrupt + `STOP` sentinel file checked each scheduler cycle (`run_scenario.py stop <run_id>` from a second terminal).
-- **Context/lineage**: immutable versioned artifacts (`artifacts/<name>/v<N>/` + sha256 + `manifest.json` written atomically via temp + `os.replace`). Pydantic schemas for structured artifacts (RequirementsSpec, TaskPlan, ArchitectureDoc, ImpactReport, CodeChangeSet, TestReport, ReviewReport, AmbiguityReport, ReleaseChecklist) — double as LLM output validators. A `DecisionRecord` per attempt links consumed artifact-versions (with hashes) to produced ones + rationale + mode.
-- **Failure classification drives retry**: TRANSIENT (LLM timeout/429, subprocess timeout) -> exponential backoff + jitter; VALIDATION (schema fail, test fail) -> immediate retry with failure output injected as feedback input; POLICY_BLOCK -> BLOCKED awaiting human; FATAL -> FAILED. After LLM attempts are exhausted -> one offline-fallback attempt (`FALLBACK_ACTIVATED` audit event).
-- **Rollback**: restore `output/` from pre-apply snapshot + retract artifact version (manifest points back to v(N-1)) + invalidate downstream consumers via lineage.
-- **Re-planning** (`replanner.py`): any artifact gaining a new current version -> walk DecisionRecords, find tasks whose recorded input hash no longer matches -> `DONE -> INVALIDATED -> PENDING` transitively -> scheduler re-executes the subgraph. Emits `REPLAN_TRIGGERED`. Branch selection (ambiguous scenario) = same machinery + `SKIPPED` for unchosen branches.
-- **Approvals**: gated at requirements sign-off (ambiguous), design, code review, release. CLI shows artifact summaries, diff stats, policy results table, lineage note. Options: `[a]pprove [r]eject+feedback [v]iew [s]afe-stop`; rejection feedback becomes a new artifact version -> triggers replan. `--auto-approve` for CI/smoke tests (approver recorded as "auto"). ASCII-only console output.
-- **Audit**: `audit.jsonl` append-only, one JSON object per line: `{seq, ts, run_id, correlation_id, event_type, payload}` — every transition, gate evaluation, policy check, approval, artifact, retry, fallback, rollback, replan, safe-stop. Flushed per event.
-- **Metrics** (`metrics.py`, single fold over audit.jsonl): success rate, retry/fallback/rollback counts, policy blocks, approval latency, **MTTR** (first failure -> subsequent DONE), per-stage + end-to-end latency. Written to `metrics.json`, shown in dashboard + final CLI summary.
+- **Workflow DSL = C# records**, not YAML — gates are predicates (`Func<TaskContext, GateResult>`) and fault injections are declared data with behavior; a serialized format would need a mini-interpreter. `required`-member records give compile-time completeness checking, and scenario files double as readable documentation.
+  ```csharp
+  new WorkflowTask {
+      Id = "architecture", Agent = AgentKey.Architect,
+      DependsOn = ["decomposition"],
+      Consumes  = ["requirements_spec", "task_plan"],
+      Produces  = ["architecture_doc", "api_contract"],
+      EntryGates = [Gate.ArtifactsCurrent("requirements_spec", "task_plan"), Gate.NotStopping],
+      ExitGates  = [Gate.SchemaValid("api_contract"), Gate.Policy(PolicyPhase.PostDesign),
+                    Gate.Approval("design_approval")],
+      Retry = RetryProfile.Standard,   // 3 attempts, exponential + jitter
+      Fallback = FallbackMode.Offline,
+  }
+  ```
+  The workflow is validated at load: acyclicity via topological sort, every consumed artifact produced upstream, every agent key registered in DI. Validation failure aborts before any task runs (exit code 4).
+
+- **Gate semantics.** Entry gates: all dependencies DONE, required artifacts exist *and are current* (content hash matches lineage expectation), policy pre-checks pass, safe-stop not engaged. Exit gates run in fixed order: schema validation → policy post-checks → test gate → approval gate last. Only after all exit gates pass is the changeset **applied** to `output/`, and only after snapshotting the previous state.
+
+  > **Stage → validate → apply** is the load-bearing decision. Work is staged in an attempt directory, judged there, and lands only once. This makes rollback a directory restore rather than an inverse-diff problem, and keeps `output/` consistent at every instant.
+
+- **State machine.** `TaskState` enum plus an explicit `FrozenDictionary<TaskState, FrozenSet<TaskState>>` legal-transition table. States: `Pending, Ready, Running, Validating, AwaitingApproval, Done, Retrying, Blocked, Failed, Invalidated, RolledBack, Skipped, Cancelled`. Illegal transitions throw.
+
+- **Concurrency — the one genuine architecture change from a single-threaded design.** .NET `Task`s run on the thread pool, so there is no free single-threaded guarantee. State mutation is serialized through an **actor-style single-consumer `Channel<StateCommand>`**: the state actor is the *only* writer to task states, the artifact manifest, and the audit log. "One transition → one audit event" therefore holds by construction, with no locks anywhere. Agent work runs concurrently on the pool under a `SemaphoreSlim` (default 3); DAG joins are `Task.WhenAll`. Every await path carries a `CancellationToken`.
+
+- **Retries and fallback.** Failures are classified `Transient` (HTTP 429/timeout, subprocess timeout) → Polly `ResiliencePipeline` with exponential backoff + jitter; `Validation` (schema mismatch, failing tests) → immediate retry with the failure output injected as a feedback input to the next attempt; `PolicyBlock` → `Blocked`, no automatic retry; `Fatal` → `Failed`. When LLM attempts are exhausted and an offline generator exists, the engine makes one fallback attempt (`FALLBACK_ACTIVATED`).
+
+- **Rollback.** Restore `output/` from the pre-apply snapshot, retract the artifact version (manifest pointer returns to v(N−1)), transition to `RolledBack`, and invalidate downstream consumers via lineage. The `ROLLBACK` audit event records both content hashes.
+
+- **Dynamic re-planning.** Any artifact gaining a new current version changes its hash. The replanner walks `DecisionRecord`s to find completed tasks whose *recorded input hash* no longer matches the current version, flips them `Done → Invalidated → Pending` transitively, and lets the scheduler re-execute exactly that subgraph. `REPLAN_TRIGGERED` records cause and affected set. Branch selection uses the same machinery plus `Skipped` for unchosen branches.
+
+- **Safe-stop, two paths.** In-process: `CancellationTokenSource` propagated through every await. Cross-process: a `STOP` sentinel file written by `stop <runId>` from another terminal, polled each scheduler cycle (also surfaced on the dashboard). On stop: no new dispatch, in-flight work cancelled at await points, non-terminal tasks → `Cancelled`, `SAFE_STOP` emitted, state flushed. Because apply happens only after gates, a stopped run never leaves `output/` torn.
+
+- **Audit.** `audit.jsonl`, append-only, one JSON object per line, flushed per event, written only by the state actor: `{seq, ts, runId, correlationId, eventType, payload}`. Serialized with source-generated `System.Text.Json` contexts.
+
+- **Metrics.** Derived by a single fold over the audit log (no parallel bookkeeping to drift): success rate, retry/fallback/rollback counts, policy blocks, approval latency, MTTR (first failure → subsequent Done), per-stage latency, end-to-end wall time. Written to `metrics.json` via atomic replace after each transition; rendered by the dashboard and the final CLI summary. `System.Diagnostics.Metrics.Meter` counters are emitted alongside so the same signals could be scraped by OpenTelemetry in a real deployment.
 
 ## 5. Agents
 
-`AgentBase.run(ctx)`: load inputs (hash-recorded) -> policy precheck -> `generate()` (LLM if enabled, else/fallback offline) -> materialize + schema-validate artifacts -> policy postcheck -> record DecisionRecord. LLM client: anthropic SDK, JSON-mode prompt -> pydantic validate -> one repair round-trip on validation error -> exceptions classified TRANSIENT/FATAL.
+`AgentBase.RunAsync(TaskContext, CancellationToken)`: load inputs (hashes recorded) → policy pre-check → generate (LLM or offline) → materialize + validate artifacts → policy post-check → record a `DecisionRecord`. Agents are registered as **keyed DI services** (`AddKeyedSingleton<IAgent>(AgentKey.Architect, …)`) and resolved by the scheduler from the task's `Agent` key.
 
-Offline mode is **not** all-fake — honest computation where possible:
+Agents write **only** into their attempt directory — they never touch `output/` directly. Only the engine applies changesets.
 
-| Agent | Real computation in offline mode |
+Offline mode is deliberately *not* all-fake. Roslyn and the real test runner do genuine work regardless of mode:
+
+| Agent | Produces | Real computation (both modes) |
+|---|---|---|
+| RequirementsAnalyst | RequirementsSpec, AmbiguityReport | — (templated prose; ambiguity interpretations pre-authored) |
+| Planner | TaskPlan | — |
+| Architect | ArchitectureDoc, ApiContract, **ImpactReport** | **Roslyn semantic analysis**: load the existing project, walk symbols, resolve references and call sites → impacted types/endpoints/data flows/regression risks |
+| CodeGenerator | CodeChangeSet | Staged file changesets only |
+| TestEngineer | TestSuite, TestReport | **Runs `dotnet test`** as an async subprocess against the generated project; TestReport parsed from the TRX report (exit code + stdout tail as fallback) |
+| Reviewer | ReviewReport | **In-memory `CSharpCompilation.Emit()`** for real compiler diagnostics with source locations, plus a banned-API semantic walk |
+| DocWriter | README / API docs | Populated from real values (endpoints from ApiContract, counts from TestReport) |
+| ReleaseManager | ReleaseChecklist | Computed from actual audit state: gates green, tests passed on latest applied code, approvals present |
+
+This is the strongest advantage of the .NET stack: codebase reasoning is done with a full semantic model (symbol resolution, reference finding), not text or syntax matching — and generated code is verified by the actual compiler.
+
+**LLM layer.** `Microsoft.Extensions.AI.IChatClient` gives a provider-agnostic abstraction with a middleware pipeline (logging, telemetry). Behind it sits a thin `HttpClient` adapter for the Anthropic Messages API (`POST https://api.anthropic.com/v1/messages`, headers `x-api-key` and `anthropic-version`) — deliberately no third-party SDK dependency, since there is no official first-party Anthropic .NET SDK and a ~150-line adapter carries less supply-chain risk than a community package. Default model `claude-fable-5`, configurable. Structured outputs use `JsonSchemaExporter.GetJsonSchemaAsNode(...)` to generate the JSON schema *from the same C# record* used for deserialization and validation — one source of truth for prompting and checking. On a validation failure the client attempts exactly one repair round-trip before the attempt is classified `Validation`.
+
+## 6. Policy guardrails
+
+Each rule returns `PolicyResult(RuleId, Verdict {Pass|Warn|Block}, Details, ComplianceTags)` and every evaluation is recorded as a `POLICY_CHECK` audit event.
+
+1. **SecretScan** — regex battery over generated file contents (cloud access keys, PEM private-key headers, hardcoded `apikey/password/secret/token` assignments) → Block.
+2. **ForbiddenApis** — Roslyn *semantic* walk against a banned-symbol list (`System.Diagnostics.Process.Start`, `System.Reflection.Emit.*`, `System.Runtime.InteropServices` P/Invoke, dynamic code loading) plus a NuGet package allowlist (generated app may reference only `Microsoft.Data.Sqlite` beyond the shared framework) → Block. Same enforcement model as `Microsoft.CodeAnalysis.BannedApiAnalyzers`, run in-process so verdicts flow into the audit log rather than only failing a build.
+3. **ProtectedPaths** — changesets may write only inside the run's `output/` (verified after `Path.GetFullPath` normalization, so `..` traversal is caught); designated protected files require an explicit human override, itself audited with `overrideBy`.
+4. **ChangeBudget** — Block above 15 files or 1200 changed LOC per changeset, with guidance to split the change.
+5. **TestGate** — exit gate for code stages: `dotnet test` exit code 0 **and** collected test count ≥ the scenario minimum.
+6. **ReleasePolicy** — release gate requires zero unresolved Blocks, TestGate green on the latest applied code version, and every mandatory approval present in the audit log.
+
+## 7. Target application — URL shortener
+
+ASP.NET Core minimal APIs, `Microsoft.Data.Sqlite` (ADO.NET, no ORM — three tables do not justify EF Core, and it keeps the generated project to a single NuGet reference).
+
+| Endpoint | Behavior |
 |---|---|
-| Architect | Real AST scan of the codebase for brownfield `ImpactReport` (routes, functions, imports, data flows) |
-| TestEngineer | Actually runs `sys.executable -m pytest` (async subprocess, cwd=`output/`, 120s timeout), parses a real TestReport |
-| Reviewer | Runs `py_compile` + AST import checks on generated code |
-| ReleaseManager | Computes the release checklist from actual audit state |
+| `POST /api/links` | `{url, customAlias?, ttlSeconds?}` → 201 `{code, shortUrl, expiresAt}`; 409 alias taken; 422 invalid; 429 rate-limited |
+| `GET /{code}` | 307 redirect (`TypedResults.Redirect(url, permanent: false, preserveMethod: true)`) + click recorded; 404 unknown/deleted; 410 expired |
+| `GET /api/links/{code}` | Metadata |
+| `DELETE /api/links/{code}` | 204 soft delete |
+| `GET /api/links/{code}/stats` | `{totalClicks, lastClickedAt, clicksByDay}` |
+| `GET /api/links` | Paged list |
+| `GET /healthz` | Health check with DB probe |
 
-Creative artifacts (requirements/design/docs/code) come from parametrized templates keyed by scenario, with `v_bug`/`v_fixed` variants for fault injection. Framed openly in ENGINEERING_SUMMARY.md.
+Platform capabilities used instead of hand-rolled code:
 
-## 6. Policy guardrails (`policy/rules.py`)
+| Concern | Implementation |
+|---|---|
+| Rate limiting | `AddRateLimiter` + `FixedWindowLimiter` (20/min per client IP on create), `RequireRateLimiting("create")`, 429 + `Retry-After` via `OnRejected` |
+| Health checks | `AddHealthChecks().AddCheck<SqliteHealthCheck>()` + `MapHealthChecks("/healthz")` with a JSON response writer |
+| Clock (TTL) | `TimeProvider` injected via DI; tests use `FakeTimeProvider` — no time-freezing library needed |
+| API documentation | `Microsoft.AspNetCore.OpenApi` (`AddOpenApi` / `MapOpenApi`) |
+| Configuration | `Shortener__DbPath` environment variable binds to `Shortener:DbPath` via `IOptions<ShortenerOptions>` |
 
-Each rule -> `PolicyResult(rule_id, PASS|WARN|BLOCK, details)` + `POLICY_CHECK` audit event with compliance tags:
+Schema: `links(id, code UNIQUE, url, is_custom, created_at, expires_at, deleted)` and `clicks(id, link_id, clicked_at, referrer)` with an index on `link_id`. `expires_at` and the whole `clicks` table are what the brownfield scenario adds.
 
-1. **SecretScan** — regex battery (AWS keys, PEM headers, hardcoded key/password assignments) over generated files -> BLOCK.
-2. **ForbiddenImports** — AST allowlist (stdlib + fastapi/pydantic/uvicorn/httpx/pytest/starlette); `eval`/`exec`/`os.system` in generated app code -> BLOCK.
-3. **ProtectedPaths** — writes only inside run `output/`; protected files require explicit human override (audited).
-4. **ChangeBudget** — max 15 files / 1200 LOC per changeset -> BLOCK with "split the change" guidance.
-5. **TestGateRule** — pytest exit 0 AND collected tests >= scenario minimum.
-6. **ReleasePolicy** — no unresolved BLOCKs + TestGate green on latest code + all mandatory approvals present.
+Codes are **base62 of `rowid + 100000`** — collision-free by construction, always ≥ 4 characters, one code path with no retry loop. Custom aliases match `^[A-Za-z0-9_-]{3,32}$` and exclude a reserved set (`api`, `healthz`, `openapi`, `admin`). TTL is enforced lazily at redirect time against the injected `TimeProvider`, with a `PurgeExpired()` maintenance method.
 
-## 7. URL shortener (target app)
-
-FastAPI + stdlib `sqlite3` (no ORM). Endpoints: `POST /api/links` (url, custom_alias?, ttl_seconds? -> 201/409/422), `GET /{code}` (307 + click recorded / 404 / 410 expired), `GET/DELETE /api/links/{code}`, `GET /api/links/{code}/stats` (total, last_clicked, by-day), `GET /api/links` (paged), `GET /healthz`.
-
-Schema: `links(id, code UNIQUE, url, is_custom, created_at, expires_at, deleted)` + `clicks(id, link_id, clicked_at, referrer)` (clicks + expires_at are what brownfield adds).
-
-- **Base62 of `rowid + 100_000`** — no collision handling needed; custom alias `^[A-Za-z0-9_-]{3,32}$` + reserved set {api, healthz, docs, admin}.
-- **TTL** = lazy expiry with injectable clock (testable, no freezegun).
-- **Rate limiting** = in-memory fixed window per IP, 20/min on create, 429 + Retry-After (documented single-process trade-off).
-- DB path from env; sync endpoints + per-request connection.
-- **Tests**: pytest + httpx `ASGITransport` — unit (base62, alias, TTL clock, limiter math) + integration (create->redirect->stats->delete, 409, 410, 429, healthz, 404).
-
-Baseline `target_app/` = everything except TTL/analytics (those arrive via brownfield). Greenfield templates generate the full set.
+Tests: xUnit v3 + `WebApplicationFactory<Program>` (in-process, no live server; the app declares `public partial class Program;` to make the entry point addressable). Unit coverage for base62 round-tripping, alias validation, TTL boundaries against `FakeTimeProvider`, and rate-limiter window math; integration coverage for create → redirect → stats → delete, plus 409 / 410 / 429 / 404 / health.
 
 ## 8. Three scenarios
 
-Scripted fault injections are declared data (`payload.injected: true` in audit) — honest, deterministic demo choreography.
+Fault injections are declared data in the scenario definition and labeled `injected: true` in every related audit event — deterministic demo choreography, honestly surfaced rather than hidden.
+
+**Constraint specific to a compiled language:** every `v_bug` template must **compile cleanly and fail at test time**. A syntax error would fail at build, which is a different (and less interesting) failure class than the retry loop is meant to demonstrate.
 
 Shared DAG core:
-`requirements -> decomposition -> architecture(APPROVAL) -> {codegen_core || codegen_api} -> test_authoring -> test_run(TestGate) -> review(APPROVAL) -> docs -> release(APPROVAL)`
+`requirements → decomposition → architecture[APPROVAL] → {codegen_core ∥ codegen_api} → test_authoring → test_run[TESTGATE] → review[APPROVAL] → docs → release[APPROVAL]`
 
-1. **Greenfield — "Build the URL shortener from requirements"**: full pipeline, parallel codegen branches joined at test_authoring. Fault 1: `v_bug` template (off-by-one in base62 decode) -> real pytest failure -> retry with feedback -> `v_fixed` -> green. Fault 2: seeded `API_KEY="sk-demo..."` in attempt 1 -> SecretScan BLOCK -> regenerate clean.
-2. **Brownfield — "Add TTL + click analytics to target_app"**: extra `impact_analysis` stage — real AST scan -> ImpactReport (impacted modules/endpoints/data flows/regression risks). Fault 1: scripted mid-run requirement revision ("record referrer") -> RequirementsSpec v2 -> **REPLAN** invalidates architecture + downstream, dashboard shows DONE->INVALIDATED. Fault 2: oversized changeset -> ChangeBudget BLOCK -> targeted patch; then seeded migration bug fails regression tests -> **ROLLBACK** from snapshot -> fixed patch -> green including original baseline tests.
-3. **Ambiguous — "Make the service handle high traffic"**: RequirementsAnalyst emits AmbiguityReport (clarifying questions + 3 interpretations: A cache hot redirects, B horizontal scaling [defer], C measure-first). **Approval gate = numbered interpretation menu** (auto-approve picks recommended A) -> branch A activates, B/C `SKIPPED`; assumptions written into RequirementsSpec v2 and flow to docs. Path A: LRU cache + invalidation on delete + load smoke test (200 concurrent redirects, p95 + cache-hit assertions). Safe-stop demo documented here.
+1. **Greenfield — "Build the URL shortener from requirements."** Full pipeline with parallel codegen branches joined at `test_authoring`. *Fault 1:* `codegen_core` attempt 1 uses `v_bug` — an off-by-one in base62 decode that compiles fine and fails real tests → `Validation` retry with the test output as feedback → attempt 2 `v_fixed` → green. *Fault 2:* `codegen_api` attempt 1 contains a hardcoded `ApiKey = "sk-demo-…"` → SecretScan Block → regeneration.
 
-Every run ends with a generated `FINAL_SUMMARY.md` from real run data (decisions, approvals, policy results, metrics, assumptions, limitations).
+2. **Brownfield — "Add TTL expiry + click analytics to the existing shortener."** `TargetApp.UrlShortener` is copied into `output/` at run start. An extra `impact_analysis` stage produces a Roslyn-derived ImpactReport. *Fault 1:* a scripted post-design requirement revision ("analytics must record referrer") creates RequirementsSpec v2 → `REPLAN_TRIGGERED`, architecture and downstream invalidated and re-run. *Fault 2:* changeset attempt 1 exceeds ChangeBudget → Block → targeted patch. *Fault 3:* the applied patch fails regression tests (a seeded **logic** bug: the INSERT omits the `expires_at` default, so TTL reads back null) → **rollback** from snapshot → corrected patch → green, including the original baseline tests.
+
+3. **Ambiguous — "Make the service handle high traffic."** RequirementsAnalyst emits an AmbiguityReport: clarifying questions plus three ranked interpretations — **A** in-process caching of hot redirects (recommended, in scope), **B** horizontal scaling with an external store (out of prototype scope, recommend defer), **C** measure-first load testing. The requirements approval gate is a Spectre `SelectionPrompt` menu; the choice writes RequirementsSpec v2 with populated `assumptions[]`, activates branch A, and marks B/C `Skipped`. Path A implements an LRU cache over code→url lookups with invalidation on delete, plus a load smoke test (200 concurrent redirects asserting p95 latency and a non-zero cache-hit count).
+
+Every run ends by generating `summary/FINAL_SUMMARY.md` from real run data — decisions, approvals, policy results, metrics, assumptions, limitations.
 
 ## 9. Dashboard
 
-Standalone `python -m agentic_sdlc.dashboard` (port 8600), **read-only over run files** (engine writes state.json/metrics.json atomically; dashboard tails audit.jsonl by seq — works live and post-run). Single `index.html`, vanilla JS polling 1.5s, 4 panels: DAG as topological columns with state chips (+ simple SVG edges if time allows), gates/approvals, audit tail, metrics cards. No React/npm — zero-install for evaluators, no risk to the engine.
+`dotnet run --project src/AgenticSdlc.Dashboard` on port 8600. A minimal API serving one static page, **read-only over the run directory** — the engine writes `state.json` and `metrics.json` via atomic replace and appends to `audit.jsonl`; the dashboard polls and tails by `seq`. Zero shared state means it cannot destabilize the engine, it survives an engine crash, and it replays finished runs for post-hoc inspection.
 
-## 10. Docs
+Four panels: DAG laid out in topological columns with per-task state chips, gates/approvals (pending approval highlighted), audit tail (last 50, incremental fetch), metrics cards. Vanilla JS, no npm and no build step — an evaluator needs only the .NET SDK they already installed.
 
-README (setup/quickstart/flags/demo commands), ARCHITECTURE.md (component + DAG + state diagrams, gate semantics, lineage model, policy catalog, concurrency + Windows notes), SCENARIOS.md (per-scenario walkthrough: input, faults, what to watch, approval script), ENGINEERING_SUMMARY.md (rationale, risks/trade-offs, assumptions, limitations, production-hardening path), TESTING.md.
+## 10. Documentation deliverables
+
+`README.md` (prerequisites, build, the three demo commands, flags, expected runtime), `docs/ARCHITECTURE.md`, `docs/SPECIFICATIONS.md`, `docs/SCENARIOS.md` (per-scenario walkthrough: input, where each fault fires, what to watch, expected audit events), `docs/ENGINEERING_SUMMARY.md` (rationale, risks, trade-offs, assumptions, limitations, production-hardening path), `docs/TESTING.md`.
 
 ## 11. Build order
 
-Always demoable; cut lines if time runs short (in order): SVG DAG edges -> LLM mode -> dashboard niceties. Never cut: engine tests, scenario smoke tests, README.
+Always demoable. Cut lines if time runs short, in order: SVG DAG edges → LLM mode (offline is the demo default anyway) → dashboard polish. Never cut: engine tests, scenario smoke tests, README.
 
 | Phase | Scope | Exit criterion |
 |---|---|---|
-| 0 | git init, venv, pinned deps, skeleton, states.py + audit.py + tests | test_states green |
-| 1 | DSL, engine scheduler, context/artifacts/lineage, retry, non-approval gates | toy DAG retries through injected failure |
-| 2 | approvals CLI + auto-approve, policy engine + 6 rules, safe-stop, replanner | replan test: artifact mutation invalidates downstream |
-| 3 | target_app baseline + tests; greenfield templates (v_bug/v_fixed) | baseline pytest green standalone |
-| 4 | agents offline + greenfield end-to-end | generated app's tests pass in subprocess |
-| 5 | brownfield + ambiguous scenarios | all 3 smoke tests green `--auto-approve --offline` |
-| 6 | dashboard | live run visible in browser |
-| 7 | LLM mode + fallback test (fake failing client) | runs with key; falls back cleanly without |
-| 8 | docs + final-summary polish + demo dry-runs | README quickstart works clean |
+| 0 | `git init`; solution scaffold, `global.json`, `Directory.Build.props`; Core: `TaskState` + transition table + audit contracts | `dotnet test` green on StateMachineTests |
+| 1 | Engine: state actor, scheduler, workflow DSL + validation, Polly retry, non-approval gates | Toy DAG with an injected failure retries and completes; parallel branches join correctly |
+| 2 | Spectre approvals + `--auto-approve`, 6 policy rules, safe-stop, replanner | Replanner test: mutating an artifact invalidates exactly the right downstream set |
+| 3 | `TargetApp.UrlShortener` baseline + its tests; greenfield templates (`v_bug` / `v_fixed`) | Baseline `dotnet test` green standalone; both templates compile |
+| 4 | Offline agents + greenfield scenario end-to-end | **First full demo:** generated project compiles and its tests pass via `dotnet test` |
+| 5 | Brownfield (Roslyn impact analysis, replan, rollback) + ambiguous (branch selection) | All three smoke tests green with `--auto-approve --offline` |
+| 6 | Dashboard | Live run visible in the browser |
+| 7 | LLM adapter + fallback path (tested with a fake failing `IChatClient`) | Runs with a key; falls back cleanly without one |
+| 8 | Docs, final-summary generator, metrics table, dry run of all three scenarios | README quickstart works from a clean clone |
 
 ## 12. Verification
 
-- `pytest tests/` — engine unit tests (states, toy DAGs with parallel+retry+block, lineage, replanner, policy) + `test_scenarios_smoke.py` running all three scenarios end-to-end with `--auto-approve --offline`.
-- `pytest target_app/tests/` — baseline green before brownfield touches it.
-- Manual demo pass: `python run_scenario.py greenfield` (interactive approvals) with dashboard open — verify retry, policy block, approval, metrics render live; brownfield -> observe REPLAN + ROLLBACK events; ambiguous -> interpretation menu branches the DAG; Ctrl+C / `stop` command -> CANCELLED states + SAFE_STOP event.
-- Generated greenfield app boots: `uvicorn` from `workspace/runs/<id>/output/`, hit `POST /api/links` -> `GET /{code}` redirect -> stats.
-- Fresh-clone check of README quickstart.
+- `dotnet test` at the solution root — engine unit tests (state machine, toy DAGs with parallel/retry/block, lineage, replanner, all six policy rules, offline agents) plus `ScenarioSmokeTests` running all three scenarios end-to-end with `--auto-approve --offline`.
+- `dotnet test tests/TargetApp.UrlShortener.Tests` — baseline green before brownfield touches it.
+- Manual demo pass with the dashboard open: greenfield (interactive approvals — observe retry, policy block, approval, live metrics), brownfield (observe `REPLAN_TRIGGERED` and `ROLLBACK`), ambiguous (interpretation menu branches the DAG). Then Ctrl+C or `stop <runId>` → `Cancelled` states and a `SAFE_STOP` event.
+- The generated greenfield app runs: `dotnet run` from `workspace/runs/<id>/output/`, then `POST /api/links` → `GET /{code}` redirect → stats.
+- Clean-clone check of the README quickstart.
 
 ## 13. Key risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| Python 3.14 wheel availability | Verified installed/importable already (fastapi, pydantic, uvicorn, httpx, pytest) |
-| Windows console cp1252 encoding | ASCII-only CLI, `PYTHONIOENCODING=utf-8` bootstrap, explicit `encoding="utf-8"` on all file I/O |
-| asyncio on Windows | Keep Proactor loop, no signal handlers, sentinel-file safe-stop, `input()` in `to_thread` |
-| Dashboard/engine file contention | Atomic replace writes, tolerate partial JSONL last line |
-| pytest subprocess flakiness | `sys.executable -m pytest`, explicit cwd/env, 120s timeout classified TRANSIENT |
-| Scope creep | Pre-agreed cut lines; no git-based changesets, no run-resume, no websockets, no auth, no coverage% (all documented trade-offs) |
+| **Build-cycle latency** — `dotnet build` + `dotnet test` per attempt is 5–15 s versus ~1 s for an interpreted stack, and retries multiply it | Keep the generated project minimal (one NuGet reference); warm `NUGET_PACKAGES` cache; `--no-restore` after the first restore; 180 s subprocess timeout classified `Transient`. Budget ~6–10 min per scenario, not 2–4. |
+| **Stale SDKs on this machine** (1.1.x / 2.1.x alongside 10.0.302) | `global.json` pinning `10.0.302` with `rollForward: latestFeature`; README states the requirement explicitly |
+| **NuGet restore needs network on first build** — undercuts the "zero-network demo" claim | Restore during setup, before the demo; document that the *demo* is offline but the *build* needs one prior restore; optionally vendor a local package folder |
+| **Injected bugs must compile** — a syntax error fails at build, not at the test gate | Every `v_bug` template is a logic bug, and a build-check test asserts all templates compile |
+| **No official Anthropic .NET SDK** | Thin `HttpClient` adapter behind `IChatClient` (~150 LOC), no third-party package; LLM mode is optional anyway |
+| **Thread-pool concurrency loses the free single-thread guarantee** | Actor discipline: only the state actor writes state; enforced by keeping mutation methods internal to the actor and covered by a concurrency test that hammers the channel |
+| **Roslyn adds meaningful package weight and first-load latency** | Accepted deliberately — it is the single biggest capability win; load the workspace once per run and reuse the compilation |
+| **Scope creep** | Pre-agreed cut lines; no git-based changesets (directory snapshots instead), no run resume after stop, no SignalR, no auth, no coverage-percentage gate — all documented as trade-offs |
